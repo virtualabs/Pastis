@@ -234,6 +234,60 @@ class FrugalwareClient:
 		else:
 			return None
 
+#
+#	KDE pastebin client
+#
+
+class KDEClient:
+	
+	"""
+	KDE pastebin client
+	"""	
+	
+	def __init__(self):
+		self.server = 'paste.kde.org'
+		self.posturl = '/'
+	
+	def upload(self, chunk):
+		"""
+		Upload of raw chunk of data
+		"""
+		params = {
+		'paste_user':'',
+		'paste_lang':'text',
+		'paste_data':chunk,
+		'paste_password':'',
+		'paste_submit':'Paste',
+		'paste_expire':'2592000',
+		}
+		
+		# Send request
+		p = urllib.urlencode(params)
+		r = httplib.HTTPConnection(self.server)
+		r.putrequest('POST',self.posturl)
+		r.putheader('Content-Type','application/x-www-form-urlencoded')
+		r.putheader('Content-Length',str(len(p)))
+		r.endheaders()
+		r.send(p)
+		
+		# Analyze response		
+		resp = r.getresponse()
+		if resp.status == 302:
+			return re.search('^http://paste\.kde\.org/([0-9]+)/$', resp.getheader('location')).group(1)
+		else:
+			return None
+			
+	def download(self, id):
+		"""
+		Download a chunk of data based on its ID (returned by the upload method above)
+		"""
+		r = urllib2.Request('http://paste.kde.org/%s/raw/'%id)
+		resp = urllib2.urlopen(r)
+		if resp:
+			return resp.read()
+		else:
+			return None
+
 
 
 #
@@ -246,7 +300,7 @@ class PastisClient:
 	def __init__(self):
 		
 		# load clients based on their hosts
-		self.pbs = [c() for c in [ArchClient, MozClient, FrugalwareClient]]
+		self.pbs = [c() for c in [ArchClient, MozClient, FrugalwareClient, KDEClient]]
 
 		# chunk size is 16Ko
 		self.chunk_size = 1024*16
