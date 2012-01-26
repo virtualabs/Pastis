@@ -1,0 +1,410 @@
+#!/usr/bin/python
+#-*- coding: utf8 -*-
+
+"""
+
+Pastis, a MegaUpload encrypted alternative ! (Well, almost ^^)
+
+How to upload a file:
+
+1) ./pastis file_to_upload.ext
+2) Pastis delivers a "pastis URL": pastis://xxxxxx/yyyyyy
+
+How to download a file from a pastis URL:
+	
+1) ./pastis pastis://xxxxxxx/yyyyy
+2) Pastis stores the file in the current directory
+
+
+CHANGELOG ------------------------------------------------------
+
++ version 0.4
+
+- Upload/download from 3 different pastebin servers
+
++ version 0.3
+
+- Improved key generation algorithm (as mentionned by @elvanderb)
+- Improved encryption (true CBC mode)
+- Improved exception handling
+
++ version 0.2
+
+- Fixed the weak key generation algorithm
+
++ version 0.1
+
+- First release
+
+----------------------------------------------------------------
+
+"""
+
+
+import sys,re,os
+import urllib,httplib,urllib2
+from base64 import b64encode,b64decode
+from Crypto.Cipher import AES
+from hashlib import md5
+from random import randint,choice
+
+
+
+#
+#  Helpers
+#
+
+
+def to_hex(s):
+	"""
+	String to hex
+	"""
+	return ''.join(['%02X'%ord(c) for c in s])
+	
+def from_hex(h):
+	"""
+	Hex to string
+	"""
+	return ''.join(['%c'%(int(h[i*2:(i+1)*2],16)) for i in range(len(h)/2)])
+
+
+
+#
+#	Pastebin sample client (for pastebin.archlinux.fr)
+#  You can add your own pastebin clients here :)
+# 
+
+
+class ArchClient:
+	
+	"""
+	Archlinux pastebin client
+	"""	
+	
+	def __init__(self):
+		self.server = 'pastebin.archlinux.fr'
+		self.posturl = '/pastebin.php'
+	
+	def upload(self, chunk):
+		"""
+		Upload of raw chunk of data
+		"""
+		params = {
+			'parent_pid':'',
+			'format':'text',
+			'code2':chunk,
+			'poster':'',
+			'paste':'Feu !',
+			'expiry':'m',
+		}
+		
+		# Send request
+		p = urllib.urlencode(params)
+		r = httplib.HTTPConnection(self.server)
+		r.putrequest('POST',self.posturl)
+		r.putheader('Content-Type','application/x-www-form-urlencoded')
+		r.putheader('Content-Length',str(len(p)))
+		r.endheaders()
+		r.send(p)
+		
+		# Analyze response		
+		resp = r.getresponse()
+		if resp.status == 302:
+			return re.search('^http://pastebin\.archlinux\.fr/([0-9]+)$', resp.getheader('location')).group(1)
+		else:
+			return None
+			
+	def download(self, id):
+		"""
+		Download a chunk of data based on its ID (returned by the upload method above)
+		"""
+		r = urllib2.Request('http://pastebin.archlinux.fr/pastebin.php?dl=%s'%id)
+		resp = urllib2.urlopen(r)
+		if resp:
+			return resp.read()
+		else:
+			return None
+
+#
+#	Mozilla pastebin client
+#
+
+class MozClient:
+	
+	"""
+	Mozilla pastebin client
+	"""	
+	
+	def __init__(self):
+		self.server = 'pastebin.mozilla.org'
+		self.posturl = '/'
+	
+	def upload(self, chunk):
+		"""
+		Upload of raw chunk of data
+		"""
+		params = {
+			'parent_pid':'',
+			'format':'text',
+			'code2':chunk,
+			'poster':'',
+			'paste':'Send',
+			'expiry':'m',
+		}
+		
+		# Send request
+		p = urllib.urlencode(params)
+		r = httplib.HTTPConnection(self.server)
+		r.putrequest('POST',self.posturl)
+		r.putheader('Content-Type','application/x-www-form-urlencoded')
+		r.putheader('Content-Length',str(len(p)))
+		r.endheaders()
+		r.send(p)
+		
+		# Analyze response		
+		resp = r.getresponse()
+		if resp.status == 302:
+			return re.search('^http://pastebin\.mozilla\.org/([0-9]+)$', resp.getheader('location')).group(1)
+		else:
+			return None
+			
+	def download(self, id):
+		"""
+		Download a chunk of data based on its ID (returned by the upload method above)
+		"""
+		r = urllib2.Request('http://pastebin.mozilla.org/?dl=%s'%id)
+		resp = urllib2.urlopen(r)
+		if resp:
+			return resp.read()
+		else:
+			return None
+
+#
+#	Frugalware pastebin client
+#
+
+class FrugalwareClient:
+	
+	"""
+	Frugalware pastebin client
+	"""	
+	
+	def __init__(self):
+		self.server = 'frugalware.org'
+		self.posturl = '/paste/'
+	
+	def upload(self, chunk):
+		"""
+		Upload of raw chunk of data
+		"""
+		params = {
+			'parent_pid':'',
+			'format':'text',
+			'code2':chunk,
+			'poster':'',
+			'paste':'Send',
+			'human':'yes', # weak antibot
+			'expiry':'m',
+		}
+		
+		# Send request
+		p = urllib.urlencode(params)
+		r = httplib.HTTPConnection(self.server)
+		r.putrequest('POST',self.posturl)
+		r.putheader('Content-Type','application/x-www-form-urlencoded')
+		r.putheader('Content-Length',str(len(p)))
+		r.endheaders()
+		r.send(p)
+		
+		# Analyze response		
+		resp = r.getresponse()
+		if resp.status == 302:
+			return re.search('^http://frugalware.org/paste/([0-9]+)$', resp.getheader('location')).group(1)
+		else:
+			return None
+			
+	def download(self, id):
+		"""
+		Download a chunk of data based on its ID (returned by the upload method above)
+		"""
+		r = urllib2.Request('http://frugalware.org/paste/?dl=%s'%id)
+		resp = urllib2.urlopen(r)
+		if resp:
+			return resp.read()
+		else:
+			return None
+
+
+
+#
+#	Main class
+#
+
+
+class PastisClient:
+
+	def __init__(self):
+		
+		# load clients based on their hosts
+		self.pbs = [c() for c in [ArchClient, MozClient, FrugalwareClient]]
+
+		# chunk size is 16Ko
+		self.chunk_size = 1024*16
+		# block size is 16 bytes (AES)
+		self.block_size = 16
+
+	def addPadding(self, data):
+		"""
+		PKCS5 recommended padding
+		"""
+		l = self.block_size - (len(data)%self.block_size)
+		for i in range(l):
+			data += chr(l)
+		return data
+		
+	def removePadding(self, data):
+		"""
+		PKCS5 recommended padding
+		"""
+		l = ord(data[-1])
+		return data[:-l]
+
+	def encrypt(self, key, data):
+		"""
+		AES encryption method. Automatically add padding if required.
+		Return a base64 encoded string.
+		"""
+		data = self.addPadding(data)
+		aes = AES.new(key, AES.MODE_CBC)
+		return b64encode(aes.encrypt(data))
+
+	def decrypt(self, key, data):
+		"""
+		AES decryption method. Automatically remove padding.
+		"""
+		aes = AES.new(key, AES.MODE_CBC)
+		data = aes.decrypt(b64decode(data))
+		return self.removePadding(data)
+
+	def uploadFile(self, key, filename):
+		"""
+		Encrypt file contents and upload it onto a remote pastebin server.
+		"""
+		try:
+
+			"""
+			read file and encrypt content. This is not the best way but the more secure.
+			"""			
+			content = open(filename, 'rb').read()
+			content = self.encrypt(key, content)
+			fsize = len(content)			
+			
+			# compute nb of chunks
+			nchunks = fsize/self.chunk_size
+			if fsize%self.chunk_size>0:
+				nchunks += 1
+
+			# upload chunks
+			chunks = []
+			parts = [content[i:i+self.chunk_size] for i in xrange(0,len(content),self.chunk_size)]			
+			i = 1
+			for part in parts:
+				sys.stdout.write('\r[+] Uploading ... %0.2f%%' % (float(i)*100.0/nchunks))
+				sys.stdout.flush()
+				pb_client = choice(self.pbs)
+				chunks.append((pb_client.server,pb_client.upload(part)))
+				i += 1
+			
+			# upload summary
+			summary = '%s:%s' % (os.path.basename(filename), ','.join(['%s#%s'%(server,id) for server,id in chunks]))
+			enc_chunk = self.encrypt(key, summary)
+			pb_client = choice(self.pbs)			
+			root = pb_client.upload(enc_chunk)
+			sys.stdout.write('\n')
+			return 'pastis://%s@%s/%s' % (to_hex(key), pb_client.server, root)
+		except IOError,e:
+			print '[!] Unable to read file %s' % filename
+
+	def isPastisUrl(self, url):
+		return (re.match('^pastis://([^@]+)@([^/]+)/(.*)$', url) is not None)
+	
+	def downloadFile(self, url):
+		r = re.search('^pastis://([^@]+)@([^/]+)/(.*)$', url)
+		if r:
+			
+			pbs = {}
+			for pb in self.pbs:
+				pbs[pb.server] = pb			
+			
+			# extract info from URL			
+			key = from_hex(r.group(1))
+			server = r.group(2)
+			id = r.group(3)
+			
+			# retrieve file info
+			data = pbs[server].download(id)
+			data = self.decrypt(key, data)
+
+			# download chunks
+			try:			
+				filename,chunks = data.split(':')
+				chunk_ids = [c.split('#') for c in chunks.split(',')]
+				content = ''
+				i=1
+				for chunk_serv,chunk_id in chunk_ids:
+					sys.stdout.write('\r[+] Downloading ... %0.2f%%' % (float(i)*100.0/len(chunk_ids)))
+					sys.stdout.flush()
+					if chunk_serv in pbs:
+						data = pbs[chunk_serv].download(chunk_id)
+					else:
+						sys.stdout.write('\n')
+						print '[!] Unkown pastebin: %s' % chunk_serv
+						return
+					content += data
+					i += 1
+			except Exception,e:
+				print e
+				sys.stdout.write('\n')
+				print '[!] Unable to download chunks from the remote server.'
+				return
+						
+			# decrypt data and save it
+			try:
+				output = self.decrypt(key, content)
+				f = open(filename,'wb')
+				f.write(output)
+				f.close()
+				sys.stdout.write('\n')
+				print '[i] File saved as %s' % filename
+			except IOError,e:
+				print '[!] Unable to write to file %s' % filename
+		else:
+			print '[!] Bad URL format. Should be like pastis://xxxxxx@pastebin.archlinux.fr/012345'
+
+
+def banner():
+	"""
+	Usage banner
+	"""
+	print 'Pastis v0.4 -- Virtualabs'
+	print ''
+	print 'Usage: %s [URL | FILE]' % sys.argv[0]
+
+
+#
+#	Main()
+#
+
+if __name__ == '__main__':
+	pc = PastisClient()
+	if len(sys.argv)==2:
+		if pc.isPastisUrl(sys.argv[1]):
+			pc.downloadFile(sys.argv[1])
+		else:
+			url = pc.uploadFile(os.urandom(16), sys.argv[1])
+			if url:
+				print '[i] Pastis URL: %s' % url
+			else:
+				print '[!] An error occured, aborted'
+	else:
+		banner()
